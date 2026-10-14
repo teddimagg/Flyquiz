@@ -1,0 +1,78 @@
+name: iOS
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: Upload this build to TestFlight
+        type: boolean
+        default: true
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core-tests:
+    name: Core tests (Linux)
+    runs-on: ubuntu-latest
+    container: swift:6.0
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run FlyquizCore tests
+        run: swift test --package-path Packages/FlyquizCore
+
+  app:
+    name: ${{ github.ref == 'refs/heads/main' && 'Build & TestFlight' || 'Build' }}
+    needs: core-tests
+    runs-on: macos-26
+    timeout-minutes: 40
+    env:
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+      DEVELOPMENT_TEAM: ${{ secrets.DEVELOPMENT_TEAM }}
+      BUNDLE_ID: ${{ vars.BUNDLE_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Decide whether to deploy
+        id: plan
+        run: |
+          wants_deploy=false
+          if [[ "$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF" == "refs/heads/main" ]]; then wants_deploy=true; fi
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "${{ inputs.deploy }}" == "true" ]]; then wants_deploy=true; fi
+          has_secrets=false
+          if [[ -n "$ASC_KEY_ID" && -n "$ASC_ISSUER_ID" && -n "$ASC_KEY_P8" && -n "$DEVELOPMENT_TEAM" ]]; then has_secrets=true; fi
+          if [[ "$wants_deploy" == true && "$has_secrets" == false ]]; then
+            echo "::warning title=TestFlight skipped::App Store Connect secrets are not configured. See docs/TESTFLIGHT.md."
+          fi
+          if [[ "$wants_deploy" == true && "$has_secrets" == true ]]; then echo "deploy=true" >> "$GITHUB_OUTPUT"; else echo "deploy=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Build for simulator
+        if: steps.plan.outputs.deploy != 'true'
+        run: scripts/ci/build_simulator.sh
+
+      - name: Archive & upload to TestFlight
+        if: steps.plan.outputs.deploy == 'true'
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: scripts/ci/testflight.sh
+
+      - name: Summary
+        if: steps.plan.outputs.deploy == 'true'
+        run: |
+          echo "### 🚀 Build ${{ github.run_number }} sent to TestFlight" >> "$GITHUB_STEP_SUMMARY"
+          echo "Open the TestFlight app on your iPhone in ~10 minutes to install it." >> "$GITHUB_STEP_SUMMARY"
